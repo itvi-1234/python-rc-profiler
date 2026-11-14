@@ -51,6 +51,22 @@ class ExtensionVocabulary:
             if item_field == field_name and item_kind == kind and item_type == interface_type
         )
 
+    def interface_field_declared(self, name: str) -> bool:
+        return any(item_name == name for definition in self.definitions for _, _, item_name in definition.interface_fields)
+
+    def condition_field_declared(self, name: str) -> bool:
+        return any(item_name == name for definition in self.definitions for item_name, _, _ in definition.condition_fields)
+
+    def field_value_fields(self, kind: str, interface_type: str) -> list[str]:
+        return sorted(
+            {
+                item_field
+                for definition in self.definitions
+                for item_field, item_kind, item_type, _ in definition.field_values
+                if item_kind == kind and item_type == interface_type
+            }
+        )
+
     def field_value_value_count(self, value: str) -> int:
         return sum(
             1

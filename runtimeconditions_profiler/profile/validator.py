@@ -64,12 +64,41 @@ class ProfileValidator:
         return diagnostics
 
 
+# The fields the core profile schema defines. Every other field of a condition is
+# defined by an extension, whose definition says what it may hold.
+CORE_CONDITION_FIELDS = {"name", "optional", "kind", "extension", "interface"}
+CORE_INTERFACE_FIELDS = {"type"}
+
+
+def values_at(root: Any, path: str) -> list[tuple[str, Any]]:
+    """Return every value a condition holds at a field path such as
+    ``interface.operations[].method``, each with the path that reaches it. A segment
+    ending in ``[]`` walks the elements of a list."""
+    found: list[tuple[str, Any]] = [("", root)]
+    for segment in path.split("."):
+        name, is_list = (segment[:-2], True) if segment.endswith("[]") else (segment, False)
+        following: list[tuple[str, Any]] = []
+        for current_path, current in found:
+            if not isinstance(current, dict) or name not in current:
+                continue
+            here = f"{current_path}.{name}" if current_path else name
+            value = current[name]
+            if not is_list:
+                following.append((here, value))
+            elif isinstance(value, list):
+                following.extend((f"{here}[{index}]", item) for index, item in enumerate(value))
+        found = following
+    return found
+
+
 def validate_condition(
     index: int,
     vocabulary: ExtensionVocabulary,
     condition: dict[str, Any],
     add: Any,
 ) -> None:
+    """Check one condition as plain data against its extensions' definitions. It knows only
+    what the core schema defines; the shape of everything else comes from the extensions."""
     prefix = f"conditions[{index}]"
     kind = str(condition.get("kind", ""))
     interface = as_map(condition.get("interface"))
@@ -80,101 +109,30 @@ def validate_condition(
         f"{prefix}.interface.type {kind}/{interface_type}",
         add,
     )
-    if "spec" in interface:
-        expect_profile_count(
-            vocabulary.interface_field_count(kind, interface_type, "spec"),
-            f"{prefix}.interface.spec for {kind}/{interface_type}",
-            add,
-        )
-        spec = as_map(interface.get("spec"))
-        fmt = str(spec.get("format", ""))
-        expect_profile_count(
-            vocabulary.field_value_count("interface.spec.format", kind, interface_type, fmt),
-            f"{prefix}.interface.spec.format {fmt} for {kind}/{interface_type}",
-            add,
-        )
-    operations = interface.get("operations")
-    if isinstance(operations, list) and operations:
-        expect_profile_count(
-            vocabulary.interface_field_count(kind, interface_type, "operations"),
-            f"{prefix}.interface.operations for {kind}/{interface_type}",
-            add,
-        )
-        for op_index, operation in enumerate(operations):
-            if isinstance(operation, str):
-                # An operation named with a plain string, such as the smtp interface's "send".
+    # A field some extension defines has to be defined for this kind and interface type.
+    for name in sorted(interface):
+        if name not in CORE_INTERFACE_FIELDS and vocabulary.interface_field_declared(name):
+            expect_profile_count(
+                vocabulary.interface_field_count(kind, interface_type, name),
+                f"{prefix}.interface.{name} for {kind}/{interface_type}",
+                add,
+            )
+    for name in sorted(condition):
+        if name not in CORE_CONDITION_FIELDS and vocabulary.condition_field_declared(name):
+            expect_profile_count(
+                vocabulary.condition_field_count(kind, interface_type, name),
+                f"{prefix}.{name} for {kind}/{interface_type}",
+                add,
+            )
+    # Where extensions enumerate the values of a field, every value found there must be one.
+    for field in vocabulary.field_value_fields(kind, interface_type):
+        for path, value in values_at(condition, field):
+            if isinstance(value, str):
                 expect_profile_count(
-                    vocabulary.field_value_count("interface.operations[]", kind, interface_type, operation),
-                    f"{prefix}.interface.operations[{op_index}] {operation} for {kind}/{interface_type}",
+                    vocabulary.field_value_count(field, kind, interface_type, value),
+                    f"{prefix}.{path} {value} for {kind}/{interface_type}",
                     add,
                 )
-                continue
-            if not isinstance(operation, dict):
-                continue
-            for field, value in operation.items():
-                field_name = f"interface.operations[].{field}"
-                if vocabulary.field_value_definition_count(field_name, kind, interface_type):
-                    expect_profile_count(
-                        vocabulary.field_value_count(field_name, kind, interface_type, str(value)),
-                        f"{prefix}.interface.operations[{op_index}].{field} {value} for {kind}/{interface_type}",
-                        add,
-                    )
-    engine = str(interface.get("engine", ""))
-    if engine:
-        expect_profile_count(
-            vocabulary.interface_field_count(kind, interface_type, "engine"),
-            f"{prefix}.interface.engine for {kind}/{interface_type}",
-            add,
-        )
-        expect_profile_count(
-            vocabulary.field_value_count("interface.engine", kind, interface_type, engine),
-            f"{prefix}.interface.engine {engine} for {kind}/{interface_type}",
-            add,
-        )
-    for field in interface:
-        if field in {"type", "spec", "operations", "engine"}:
-            continue
-        expect_profile_count(
-            vocabulary.interface_field_count(kind, interface_type, field),
-            f"{prefix}.interface.{field} for {kind}/{interface_type}",
-            add,
-        )
-    if "configuration" in condition:
-        expect_profile_count(
-            vocabulary.condition_field_count(kind, interface_type, "configuration"),
-            f"{prefix}.configuration for {kind}/{interface_type}",
-            add,
-        )
-        configuration = as_map(condition.get("configuration"))
-        for env_index, env in enumerate(configuration.get("env", []) if isinstance(configuration.get("env"), list) else []):
-            if isinstance(env, dict):
-                prop = str(env.get("property", ""))
-                expect_profile_count(
-                    vocabulary.field_value_count("configuration.env[].property", kind, interface_type, prop),
-                    f"{prefix}.configuration.env[{env_index}].property {prop} for {kind}/{interface_type}",
-                    add,
-                )
-        alternatives = configuration.get("alternatives", [])
-        if isinstance(alternatives, list):
-            for alt_index, alternative in enumerate(alternatives):
-                if not isinstance(alternative, dict):
-                    continue
-                env_items = alternative.get("env", [])
-                if not isinstance(env_items, list):
-                    continue
-                for env_index, env in enumerate(env_items):
-                    if isinstance(env, dict):
-                        prop = str(env.get("property", ""))
-                        expect_profile_count(
-                            vocabulary.field_value_count(
-                                "configuration.alternatives[].env[].property",
-                                kind,
-                                interface_type,
-                                prop,
-                            ),
-                            f"{prefix}.configuration.alternatives[{alt_index}].env[{env_index}].property {prop} for {kind}/{interface_type}",
-                            add,
-                        )
 
 
 def expect_profile_count(count: int, message: str, add: Any) -> None:
